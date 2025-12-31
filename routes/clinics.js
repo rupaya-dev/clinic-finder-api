@@ -1,443 +1,366 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
 
-// Try to require Clinic model
-let Clinic;
-try {
-  Clinic = require('../models/clinic');
-} catch (error) {
-  console.log('⚠️ Clinic model not found');
-  Clinic = null;
-}
+// Existing city coordinates mapping...
+// (आपका existing code यहाँ रहेगा)
 
-// Haversine formula for distance calculation
-function calculateDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Earth's radius in km
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = 
-    Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
-    Math.sin(dLon/2) * Math.sin(dLon/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c;
-}
+// New: Doctor Schema
+const doctorSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  specialization: String,
+  qualification: String,
+  experience: Number,
+  consultationFee: Number,
+  availableSlots: [{
+    day: String,
+    startTime: String,
+    endTime: String
+  }],
+  clinicType: {
+    type: String,
+    enum: ['individual', 'multi-branch', 'both'],
+    default: 'individual'
+  },
+  clinics: [{
+    clinicId: String,
+    name: String,
+    type: { type: String, enum: ['individual', 'branch'] },
+    address: Object,
+    isPrimary: { type: Boolean, default: false }
+  }],
+  rating: { type: Number, default: 0 },
+  isActive: { type: Boolean, default: true }
+});
 
-// ==================== REAL LOCATION-BASED ENDPOINTS ====================
+const Doctor = mongoose.model('Doctor', doctorSchema);
 
-// 1. NEARBY CLINICS (Real location-based search)
-// GET /api/clinics/nearby?lat=28.6139&lon=77.2090&radius=5000&limit=10
-router.get('/nearby', async (req, res) => {
+// Existing GET /api/clinics/nearby/city endpoint...
+// (आपका existing code यहाँ रहेगा)
+
+// ✅ NEW: GET /api/clinics/doctors - Find doctors with clinic selection
+router.get('/doctors', async (req, res) => {
   try {
-    const { lat, lon, radius = 5000, limit = 10 } = req.query;
+    const { city, specialization, clinicType } = req.query;
     
-    // Validation
-    if (!lat || !lon) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing parameters. Required: lat, lon. Optional: radius (meters, default: 5000), limit (default: 10)'
-      });
+    let query = { isActive: true };
+    
+    if (specialization) {
+      query.specialization = new RegExp(specialization, 'i');
     }
     
-    const userLat = parseFloat(lat);
-    const userLon = parseFloat(lon);
-    const searchRadius = parseFloat(radius);
-    const resultLimit = parseInt(limit);
-    
-    // Coordinate validation
-    if (isNaN(userLat) || isNaN(userLon) || userLat < -90 || userLat > 90 || userLon < -180 || userLon > 180) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid coordinates. Valid range: lat: -90 to 90, lon: -180 to 180'
-      });
+    if (clinicType) {
+      query['clinics.type'] = clinicType;
     }
     
-    console.log(`📍 Nearby search: [${userLat}, ${userLon}], radius: ${searchRadius}m`);
+    const doctors = await Doctor.find(query).lean();
     
-    // Database query
-    if (Clinic) {
-      try {
-        const clinics = await Clinic.find({
-          location: {
-            $near: {
-              $geometry: {
-                type: "Point",
-                coordinates: [userLon, userLat]  // MongoDB uses [longitude, latitude]
-              },
-              $maxDistance: searchRadius
-            }
-          }
-        }).limit(resultLimit);
-        
-        // Add calculated distance to each clinic
-        const clinicsWithDistance = clinics.map(clinic => {
-          const distanceKm = calculateDistance(
-            userLat,
-            userLon,
-            clinic.location.coordinates[1],  // latitude
-            clinic.location.coordinates[0]   // longitude
-          );
-          
-          return {
-            id: clinic._id,
-            name: clinic.name,
-            address: clinic.address,
-            city: clinic.city,
-            phone: clinic.phone,
-            distance: distanceKm,
-            distance_display: `${distanceKm.toFixed(1)} km`,
-            coordinates: {
-              lat: clinic.location.coordinates[1],
-              lon: clinic.location.coordinates[0]
-            },
-            specialities: clinic.specialities || [],
-            opening_hours: clinic.opening_hours
-          };
-        });
-        
-        // Sort by distance
-        clinicsWithDistance.sort((a, b) => a.distance - b.distance);
-        
-        return res.json({
-          success: true,
-          source: 'database',
-          user_location: { lat: userLat, lon: userLon },
-          search_radius: `${searchRadius/1000} km`,
-          total_found: clinicsWithDistance.length,
-          message: `Found ${clinicsWithDistance.length} clinic(s) within ${searchRadius/1000} km`,
-          clinics: clinicsWithDistance
-        });
-        
-      } catch (dbError) {
-        console.error('Database query error:', dbError);
-        return res.status(500).json({
-          success: false,
-          message: 'Database error',
-          error: process.env.NODE_ENV === 'production' ? null : dbError.message
-        });
-      }
+    // Filter by city if provided
+    let filteredDoctors = doctors;
+    if (city) {
+      filteredDoctors = doctors.filter(doctor => 
+        doctor.clinics.some(clinic => 
+          clinic.address && 
+          clinic.address.city && 
+          clinic.address.city.toLowerCase().includes(city.toLowerCase())
+        )
+      );
     }
     
-    // Fallback if no database
+    // Categorize doctors based on clinic type
+    const categorizedDoctors = filteredDoctors.map(doctor => {
+      const individualClinics = doctor.clinics.filter(c => c.type === 'individual');
+      const branchClinics = doctor.clinics.filter(c => c.type === 'branch');
+      
+      return {
+        doctorId: doctor._id,
+        name: doctor.name,
+        specialization: doctor.specialization,
+        experience: doctor.experience,
+        consultationFee: doctor.consultationFee,
+        rating: doctor.rating,
+        availableSlots: doctor.availableSlots,
+        clinicInfo: {
+          totalClinics: doctor.clinics.length,
+          individualClinics: individualClinics.length,
+          branchClinics: branchClinics.length,
+          clinicType: doctor.clinicType
+        },
+        selectionLogic: {
+          ifIndividualClinic: individualClinics.length > 0 
+            ? `Auto-select: ${individualClinics[0].name}` 
+            : null,
+          ifMultiBranch: branchClinics.length > 0
+            ? `Choose from ${branchClinics.length} branches`
+            : null,
+          autoSelection: individualClinics.length === 1 && branchClinics.length === 0
+            ? 'available' 
+            : 'not-available'
+        }
+      };
+    });
+    
     res.json({
       success: true,
-      source: 'fallback',
-      message: 'Database not available. Using mock response.',
-      user_location: { lat: userLat, lon: userLon },
-      clinics: getMockClinicsNearby(userLat, userLon, searchRadius)
+      count: categorizedDoctors.length,
+      selectionLogic: {
+        individualClinic: 'Auto-selected',
+        multiBranch: 'Manual selection required',
+        bothTypes: 'Show all options'
+      },
+      doctors: categorizedDoctors
     });
     
   } catch (error) {
-    console.error('📍 Nearby API error:', error);
+    console.error('Doctors API Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error',
-      error: process.env.NODE_ENV === 'production' ? null : error.message
+      error: 'Server error',
+      message: error.message
     });
   }
 });
 
-// 2. CITY + NEARBY (City filter with location sorting)
-// GET /api/clinics/city-nearby?city=delhi&lat=28.5245&lon=77.2000&limit=5
-router.get('/city-nearby', async (req, res) => {
+// ✅ NEW: POST /api/clinics/select-doctor - Select doctor with clinic
+router.post('/select-doctor', async (req, res) => {
   try {
-    const { city, lat, lon, limit = 5 } = req.query;
+    const { doctorId, clinicId, branchId } = req.body;
     
-    if (!city || !lat || !lon) {
-      return res.status(400).json({
+    const doctor = await Doctor.findById(doctorId).lean();
+    
+    if (!doctor) {
+      return res.status(404).json({
         success: false,
-        message: 'Required: city, lat, lon'
+        error: 'Doctor not found'
       });
     }
     
-    const userLat = parseFloat(lat);
-    const userLon = parseFloat(lon);
+    // Find the clinic
+    let selectedClinic = null;
+    let selectionType = '';
+    let availableBranches = [];
     
-    if (Clinic) {
-      const clinics = await Clinic.find({ 
-        city: city.toLowerCase() 
-      }).limit(parseInt(limit));
+    if (clinicId) {
+      // Specific clinic selected
+      selectedClinic = doctor.clinics.find(c => c.clinicId === clinicId);
       
-      // Calculate distance for each and sort
-      const clinicsWithDistance = clinics.map(clinic => {
-        const distanceKm = calculateDistance(
-          userLat, userLon,
-          clinic.location.coordinates[1],
-          clinic.location.coordinates[0]
-        );
-        
-        return {
-          id: clinic._id,
-          name: clinic.name,
-          address: clinic.address,
-          distance: distanceKm,
-          distance_display: `${distanceKm.toFixed(1)} km`,
-          phone: clinic.phone
-        };
-      });
-      
-      clinicsWithDistance.sort((a, b) => a.distance - b.distance);
-      
-      return res.json({
-        success: true,
-        city: city,
-        user_location: { lat: userLat, lon: userLon },
-        clinics: clinicsWithDistance
-      });
-    }
-    
-    // Fallback
-    res.json({
-      success: true,
-      message: 'Using mock data',
-      clinics: getMockClinicsByCity(city, userLat, userLon)
-    });
-    
-  } catch (error) {
-    console.error('City nearby error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// 3. NEAREST CLINIC (Single closest)
-// GET /api/clinics/nearest?lat=28.6139&lon=77.2090
-router.get('/nearest', async (req, res) => {
-  try {
-    const { lat, lon } = req.query;
-    
-    if (!lat || !lon) return res.status(400).json({ 
-      success: false, 
-      message: 'lat and lon required' 
-    });
-    
-    const userLat = parseFloat(lat);
-    const userLon = parseFloat(lon);
-    
-    if (Clinic) {
-      const clinics = await Clinic.find({
-        location: {
-          $near: {
-            $geometry: {
-              type: "Point",
-              coordinates: [userLon, userLat]
-            }
-          }
-        }
-      }).limit(1);
-      
-      if (clinics.length > 0) {
-        const clinic = clinics[0];
-        const distance = calculateDistance(
-          userLat, userLon,
-          clinic.location.coordinates[1],
-          clinic.location.coordinates[0]
-        );
-        
-        return res.json({
-          success: true,
-          source: 'database',
-          message: 'Nearest clinic found',
-          clinic: {
-            id: clinic._id,
-            name: clinic.name,
-            address: clinic.address,
-            city: clinic.city,
-            phone: clinic.phone,
-            distance: distance,
-            distance_display: `${distance.toFixed(1)} km`,
-            coordinates: {
-              lat: clinic.location.coordinates[1],
-              lon: clinic.location.coordinates[0]
-            }
-          },
-          user_location: { lat: userLat, lon: userLon }
+      if (!selectedClinic) {
+        return res.status(400).json({
+          success: false,
+          error: 'Doctor not available at this clinic'
         });
       }
-    }
-    
-    // Fallback
-    const mockClinic = getMockNearestClinic(userLat, userLon);
-    res.json({
-      success: true,
-      source: 'mock',
-      message: 'Nearest clinic (mock data)',
-      clinic: mockClinic
-    });
-    
-  } catch (error) {
-    console.error('Nearest error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ==================== HELPER FUNCTIONS ====================
-
-function getMockClinicsNearby(lat, lon, radius) {
-  // Mock clinics with real Delhi coordinates
-  const mockClinics = [
-    {
-      id: 1,
-      name: "Max Hospital Saket",
-      address: "Press Enclave Road, Saket, Delhi",
-      city: "delhi",
-      phone: "011-26515050",
-      coordinates: { lat: 28.5245, lon: 77.2000 },
-      distance: calculateDistance(lat, lon, 28.5245, 77.2000),
-      specialities: ["Emergency", "Cardiology", "Orthopedics"]
-    },
-    {
-      id: 2,
-      name: "Apollo Clinic Sarita Vihar",
-      address: "Sarita Vihar, Delhi",
-      city: "delhi",
-      phone: "011-29871090",
-      coordinates: { lat: 28.5314, lon: 77.2923 },
-      distance: calculateDistance(lat, lon, 28.5314, 77.2923),
-      specialities: ["General Medicine", "Pediatrics"]
-    },
-    {
-      id: 3,
-      name: "AIIMS Hospital",
-      address: "Ansari Nagar, Delhi",
-      city: "delhi",
-      phone: "011-26588500",
-      coordinates: { lat: 28.5675, lon: 77.2100 },
-      distance: calculateDistance(lat, lon, 28.5675, 77.2100),
-      specialities: ["All Specialities", "Research"]
-    }
-  ];
-  
-  // Filter by radius and add distance display
-  return mockClinics
-    .filter(clinic => clinic.distance <= (radius/1000))
-    .map(clinic => ({
-      ...clinic,
-      distance_display: `${clinic.distance.toFixed(1)} km`
-    }))
-    .sort((a, b) => a.distance - b.distance);
-}
-
-function getMockClinicsByCity(city, userLat, userLon) {
-  const cityClinics = {
-    'delhi': [
-      { name: "Max Hospital", lat: 28.5245, lon: 77.2000 },
-      { name: "Apollo Clinic", lat: 28.5314, lon: 77.2923 },
-      { name: "AIIMS", lat: 28.5675, lon: 77.2100 }
-    ],
-    'mumbai': [
-      { name: "Kokilaben Hospital", lat: 19.1185, lon: 72.8721 },
-      { name: "Lilavati Hospital", lat: 19.0542, lon: 72.8302 }
-    ]
-  };
-  
-  const clinics = cityClinics[city.toLowerCase()] || [];
-  
-  return clinics.map(clinic => {
-    const distance = calculateDistance(userLat, userLon, clinic.lat, clinic.lon);
-    return {
-      name: clinic.name,
-      distance: distance,
-      distance_display: `${distance.toFixed(1)} km`
-    };
-  }).sort((a, b) => a.distance - b.distance);
-}
-
-function getMockNearestClinic(lat, lon) {
-  const clinics = [
-    { name: "Max Hospital", lat: 28.5245, lon: 77.2000, address: "Saket, Delhi", phone: "011-26515050" },
-    { name: "Apollo Clinic", lat: 28.5314, lon: 77.2923, address: "Sarita Vihar, Delhi", phone: "011-29871090" }
-  ];
-  
-  let nearest = clinics[0];
-  let minDistance = calculateDistance(lat, lon, nearest.lat, nearest.lon);
-  
-  clinics.forEach(clinic => {
-    const distance = calculateDistance(lat, lon, clinic.lat, clinic.lon);
-    if (distance < minDistance) {
-      minDistance = distance;
-      nearest = clinic;
-    }
-  });
-  
-  return {
-    name: nearest.name,
-    address: nearest.address,
-    phone: nearest.phone,
-    distance: minDistance,
-    distance_display: `${minDistance.toFixed(1)} km`,
-    coordinates: { lat: nearest.lat, lon: nearest.lon }
-  };
-}
-
-// ==================== EXISTING CITY-BASED ENDPOINT ====================
-
-// Keep existing city-based endpoint for backward compatibility
-router.get('/', async (req, res) => {
-  try {
-    const city = req.query.city ? req.query.city.toLowerCase().trim() : 'delhi';
-    
-    console.log(`[API] City-based search: "${city}"`);
-    
-    if (Clinic) {
-      try {
-        const clinics = await Clinic.find({ city: city }).limit(20);
-        
-        if (clinics.length > 0) {
-          return res.json({
-            success: true,
-            source: 'database',
-            city: city,
-            message: `Found ${clinics.length} clinics in ${city}`,
-            clinics: clinics.map(clinic => ({
-              id: clinic._id,
-              name: clinic.name,
-              address: clinic.address,
-              phone: clinic.phone,
-              specialities: clinic.specialities
-            }))
+      
+      if (selectedClinic.type === 'individual') {
+        selectionType = 'auto';
+      } else if (selectedClinic.type === 'branch') {
+        selectionType = 'manual';
+        // For branch, we might need branchId
+        if (!branchId) {
+          return res.status(400).json({
+            success: false,
+            error: 'Branch selection required',
+            selectionType: 'branch-selection-needed'
           });
         }
-      } catch (dbError) {
-        console.log('DB error, using fallback:', dbError.message);
+      }
+    } else {
+      // Auto-select logic based on doctor's clinic type
+      const individualClinics = doctor.clinics.filter(c => c.type === 'individual');
+      const branchClinics = doctor.clinics.filter(c => c.type === 'branch');
+      
+      if (individualClinics.length > 0) {
+        // Auto-select individual clinic
+        selectedClinic = individualClinics[0];
+        selectionType = 'auto';
+      } else if (branchClinics.length > 0) {
+        // Show branch options
+        selectionType = 'choose-branch';
+        availableBranches = branchClinics;
+        
+        return res.json({
+          success: true,
+          selectionType: 'branch-selection-required',
+          message: 'Please select a branch',
+          doctor: {
+            id: doctor._id,
+            name: doctor.name,
+            specialization: doctor.specialization
+          },
+          availableBranches: availableBranches.map(b => ({
+            clinicId: b.clinicId,
+            name: b.name,
+            address: b.address,
+            type: b.type
+          }))
+        });
       }
     }
     
-    // Fallback hardcoded data
-    const fallbackClinics = {
-      'delhi': [
-        { id: 1, name: "Max Hospital", address: "Saket, Delhi", phone: "011-26515050" },
-        { id: 2, name: "Apollo Clinic", address: "Sarita Vihar, Delhi", phone: "011-29871090" }
-      ],
-      'mumbai': [
-        { id: 3, name: "Kokilaben Hospital", address: "Andheri, Mumbai", phone: "022-30919000" },
-        { id: 4, name: "Lilavati Hospital", address: "Bandra, Mumbai", phone: "022-39999999" }
-      ]
+    // Response for successful selection
+    const response = {
+      success: true,
+      selection: {
+        doctor: {
+          id: doctor._id,
+          name: doctor.name,
+          specialization: doctor.specialization,
+          consultationFee: doctor.consultationFee
+        },
+        clinic: selectedClinic ? {
+          id: selectedClinic.clinicId,
+          name: selectedClinic.name,
+          type: selectedClinic.type,
+          address: selectedClinic.address
+        } : null,
+        selectionType: selectionType,
+        timestamp: new Date().toISOString(),
+        nextStep: selectionType === 'auto' 
+          ? 'proceed-to-appointment'
+          : 'confirm-branch-selection'
+      }
     };
     
-    if (fallbackClinics[city]) {
-      return res.json({
-        success: true,
-        source: 'fallback',
-        city: city,
-        message: `Found ${fallbackClinics[city].length} clinics in ${city}`,
-        clinics: fallbackClinics[city]
-      });
-    }
+    res.json(response);
     
-    res.status(404).json({
-      success: false,
-      city: city,
-      message: `No clinics found for "${city}"`,
-      clinics: []
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ NEW: POST /api/clinics/seed-doctors - Add sample doctors
+router.post('/seed-doctors', async (req, res) => {
+  try {
+    await Doctor.deleteMany({});
+    
+    const sampleDoctors = [
+      {
+        name: "Dr. Rajesh Sharma",
+        specialization: "Cardiologist",
+        qualification: "MD, DM Cardiology",
+        experience: 15,
+        consultationFee: 1500,
+        availableSlots: [
+          { day: "Monday", startTime: "10:00", endTime: "14:00" },
+          { day: "Wednesday", startTime: "14:00", endTime: "18:00" }
+        ],
+        clinicType: "individual",
+        clinics: [
+          {
+            clinicId: "clinic_001",
+            name: "City Heart Clinic",
+            type: "individual",
+            address: {
+              street: "123 Cardiac Street",
+              city: "Delhi",
+              state: "Delhi",
+              pincode: "110001"
+            },
+            isPrimary: true
+          }
+        ],
+        rating: 4.8
+      },
+      {
+        name: "Dr. Priya Singh",
+        specialization: "Pediatrician",
+        qualification: "MD Pediatrics",
+        experience: 10,
+        consultationFee: 1000,
+        availableSlots: [
+          { day: "Tuesday", startTime: "09:00", endTime: "13:00" },
+          { day: "Friday", startTime: "15:00", endTime: "19:00" }
+        ],
+        clinicType: "multi-branch",
+        clinics: [
+          {
+            clinicId: "clinic_002",
+            name: "Child Care Center - South Delhi",
+            type: "branch",
+            address: {
+              street: "456 Kids Avenue",
+              city: "Delhi",
+              state: "Delhi",
+              pincode: "110017"
+            },
+            isPrimary: true
+          },
+          {
+            clinicId: "clinic_003",
+            name: "Child Care Center - Noida",
+            type: "branch",
+            address: {
+              street: "789 Child Street",
+              city: "Noida",
+              state: "UP",
+              pincode: "201301"
+            },
+            isPrimary: false
+          }
+        ],
+        rating: 4.6
+      },
+      {
+        name: "Dr. Amit Verma",
+        specialization: "Orthopedic",
+        qualification: "MS Orthopedics",
+        experience: 12,
+        consultationFee: 1200,
+        availableSlots: [
+          { day: "Monday", startTime: "14:00", endTime: "18:00" },
+          { day: "Thursday", startTime: "10:00", endTime: "14:00" }
+        ],
+        clinicType: "both",
+        clinics: [
+          {
+            clinicId: "clinic_004",
+            name: "Bone & Joint Clinic",
+            type: "individual",
+            address: {
+              street: "321 Bone Street",
+              city: "Delhi",
+              state: "Delhi",
+              pincode: "110019"
+            },
+            isPrimary: true
+          },
+          {
+            clinicId: "clinic_005",
+            name: "MultiCare Hospital - Gurgaon",
+            type: "branch",
+            address: {
+              street: "654 Hospital Road",
+              city: "Gurgaon",
+              state: "Haryana",
+              pincode: "122002"
+            },
+            isPrimary: false
+          }
+        ],
+        rating: 4.7
+      }
+    ];
+    
+    await Doctor.insertMany(sampleDoctors);
+    
+    res.json({
+      success: true,
+      message: "Sample doctors added successfully",
+      count: sampleDoctors.length,
+      doctors: sampleDoctors.map(d => ({
+        name: d.name,
+        specialization: d.specialization,
+        clinicType: d.clinicType,
+        clinics: d.clinics.length
+      }))
     });
     
   } catch (error) {
-    console.error('City API error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    res.status(500).json({ error: error.message });
   }
 });
+
+// Existing calculateDistance function...
+// (आपका existing code यहाँ रहेगा)
 
 module.exports = router;
