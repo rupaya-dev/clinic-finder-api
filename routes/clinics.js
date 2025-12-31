@@ -1,19 +1,19 @@
-// GET /api/clinics/specialists - Get doctors by specialization
+// GET /api/clinics/specialists - Get doctors/specialists by city and specialty
 router.get('/specialists', async (req, res) => {
   try {
     await connectDB();
     
-    const { city, specialization, type } = req.query;
+    const { city, specialty, clinicType } = req.query;
     
-    // Get all clinics first
+    // Get all clinics in the city
     let query = {};
     
     if (city) {
       const cityLower = city.toLowerCase();
-      // We'll filter manually after getting data
+      // We'll filter in code since we have extractCityFromDocument function
     }
     
-    const allClinics = await Clinic.find(query).lean();
+    const allClinics = await Clinic.find({}).lean();
     
     // Filter by city if provided
     let filteredClinics = allClinics;
@@ -25,18 +25,73 @@ router.get('/specialists', async (req, res) => {
       });
     }
     
-    // Categorize specialists
-    const specialistsData = categorizeSpecialists(filteredClinics, specialization, type);
+    // Extract specialists from clinics
+    const specialists = [];
+    
+    filteredClinics.forEach(clinic => {
+      const clinicCity = extractCityFromDocument(clinic);
+      
+      // If clinic has specialities array
+      if (clinic.specialities && Array.isArray(clinic.specialities)) {
+        clinic.specialities.forEach(specialtyName => {
+          // Filter by specialty if provided
+          if (specialty && !specialtyName.toLowerCase().includes(specialty.toLowerCase())) {
+            return;
+          }
+          
+          // Determine clinic type
+          let clinicType = 'individual';
+          if (clinic.name.toLowerCase().includes('hospital') || 
+              clinic.name.toLowerCase().includes('multispecialty') ||
+              clinic.name.toLowerCase().includes('medical center')) {
+            clinicType = 'multi-specialty';
+          }
+          
+          specialists.push({
+            clinicId: clinic._id,
+            clinicName: clinic.name,
+            clinicType: clinicType,
+            city: clinicCity,
+            address: clinic.address,
+            phone: clinic.phone,
+            specialty: specialtyName.trim(),
+            rating: clinic.rating || 0,
+            isEmergency: clinic.isEmergency || false,
+            hasLocation: !!clinic.location,
+            // Simulate doctor names based on specialty and clinic
+            availableDoctors: generateDoctorsForSpecialty(specialtyName, clinic.name, clinicType)
+          });
+        });
+      }
+    });
+    
+    // Group by specialty
+    const groupedBySpecialty = {};
+    specialists.forEach(spec => {
+      if (!groupedBySpecialty[spec.specialty]) {
+        groupedBySpecialty[spec.specialty] = [];
+      }
+      groupedBySpecialty[spec.specialty].push(spec);
+    });
+    
+    // Format response
+    const specialtiesList = Object.keys(groupedBySpecialty).sort();
     
     res.json({
       success: true,
-      totalClinics: filteredClinics.length,
-      filters: {
-        city: city || 'all',
-        specialization: specialization || 'all',
-        type: type || 'all'
-      },
-      ...specialistsData
+      city: city || 'all',
+      totalSpecialists: specialists.length,
+      totalSpecialties: specialtiesList.length,
+      specialties: specialtiesList,
+      specialistsBySpecialty: groupedBySpecialty,
+      summary: specialtiesList.map(spec => ({
+        specialty: spec,
+        count: groupedBySpecialty[spec].length,
+        clinicTypes: {
+          individual: groupedBySpecialty[spec].filter(s => s.clinicType === 'individual').length,
+          multiSpecialty: groupedBySpecialty[spec].filter(s => s.clinicType === 'multi-specialty').length
+        }
+      }))
     });
     
   } catch (error) {
@@ -49,16 +104,16 @@ router.get('/specialists', async (req, res) => {
   }
 });
 
-// GET /api/clinics/specialists/individual - Only individual specialists
-router.get('/specialists/individual', async (req, res) => {
+// GET /api/clinics/specialists/details - Detailed specialists with doctors
+router.get('/specialists/details', async (req, res) => {
   try {
     await connectDB();
     
-    const { city } = req.query;
+    const { city, specialty, experience } = req.query;
     
     const allClinics = await Clinic.find({}).lean();
     
-    // Filter by city if provided
+    // Filter by city
     let filteredClinics = allClinics;
     if (city) {
       const cityLower = city.toLowerCase();
@@ -68,15 +123,65 @@ router.get('/specialists/individual', async (req, res) => {
       });
     }
     
-    // Get individual specialists
-    const individualSpecialists = getIndividualSpecialists(filteredClinics);
+    // Generate detailed specialists data
+    const detailedSpecialists = [];
+    
+    filteredClinics.forEach(clinic => {
+      const clinicCity = extractCityFromDocument(clinic);
+      
+      if (clinic.specialities && Array.isArray(clinic.specialities)) {
+        clinic.specialities.forEach(specialtyName => {
+          // Filter by specialty if provided
+          if (specialty && !specialtyName.toLowerCase().includes(specialty.toLowerCase())) {
+            return;
+          }
+          
+          // Generate doctors for this specialty
+          const doctors = generateDetailedDoctors(specialtyName, clinic.name, clinicCity);
+          
+          // Filter by experience if provided
+          let filteredDoctors = doctors;
+          if (experience) {
+            const exp = parseInt(experience);
+            filteredDoctors = doctors.filter(d => d.experience >= exp);
+          }
+          
+          if (filteredDoctors.length > 0) {
+            detailedSpecialists.push({
+              clinicInfo: {
+                id: clinic._id,
+                name: clinic.name,
+                city: clinicCity,
+                address: clinic.address,
+                phone: clinic.phone,
+                type: determineClinicType(clinic.name, clinic.specialities),
+                rating: clinic.rating || 0
+              },
+              specialty: specialtyName,
+              totalDoctors: filteredDoctors.length,
+              doctors: filteredDoctors,
+              consultationFee: calculateConsultationFee(specialtyName, clinic.rating)
+            });
+          }
+        });
+      }
+    });
+    
+    // Sort by number of doctors
+    detailedSpecialists.sort((a, b) => b.totalDoctors - a.totalDoctors);
     
     res.json({
       success: true,
-      type: 'individual',
-      count: individualSpecialists.length,
       city: city || 'all',
-      specialists: individualSpecialists
+      specialty: specialty || 'all',
+      totalClinics: detailedSpecialists.length,
+      totalDoctors: detailedSpecialists.reduce((sum, item) => sum + item.totalDoctors, 0),
+      specialists: detailedSpecialists,
+      categories: {
+        individualSpecialists: detailedSpecialists.filter(s => s.clinicInfo.type === 'individual').length,
+        multiSpecialtyClinics: detailedSpecialists.filter(s => s.clinicInfo.type === 'multi-specialty').length,
+        hospitals: detailedSpecialists.filter(s => s.clinicInfo.type === 'hospital').length
+      }
     });
     
   } catch (error) {
@@ -84,293 +189,214 @@ router.get('/specialists/individual', async (req, res) => {
   }
 });
 
-// GET /api/clinics/specialists/multi - Only multi-specialists
-router.get('/specialists/multi', async (req, res) => {
-  try {
-    await connectDB();
-    
-    const { city } = req.query;
-    
-    const allClinics = await Clinic.find({}).lean();
-    
-    // Filter by city if provided
-    let filteredClinics = allClinics;
-    if (city) {
-      const cityLower = city.toLowerCase();
-      filteredClinics = allClinics.filter(clinic => {
-        const clinicCity = extractCityFromDocument(clinic).toLowerCase();
-        return clinicCity.includes(cityLower);
-      });
+// Helper function to determine clinic type
+function determineClinicType(clinicName, specialities) {
+  const nameLower = clinicName.toLowerCase();
+  
+  if (nameLower.includes('hospital') || nameLower.includes('medicity') || nameLower.includes('institute')) {
+    return 'hospital';
+  }
+  
+  if (specialities && specialities.length > 5) {
+    return 'multi-specialty';
+  }
+  
+  if (specialities && specialities.length === 1) {
+    return 'individual';
+  }
+  
+  return 'clinic';
+}
+
+// Helper function to generate doctors for a specialty
+function generateDoctorsForSpecialty(specialty, clinicName, clinicType) {
+  const doctors = [];
+  
+  // Common doctor names by specialty
+  const doctorTemplates = {
+    'Cardiology': ['Dr. Sharma', 'Dr. Verma', 'Dr. Reddy', 'Dr. Kapoor'],
+    'Neurology': ['Dr. Patel', 'Dr. Kumar', 'Dr. Joshi', 'Dr. Nair'],
+    'Orthopedics': ['Dr. Singh', 'Dr. Gupta', 'Dr. Malhotra', 'Dr. Choudhary'],
+    'Pediatrics': ['Dr. Desai', 'Dr. Iyer', 'Dr. Mehta', 'Dr. Rao'],
+    'Dermatology': ['Dr. Khan', 'Dr. Agarwal', 'Dr. Bose', 'Dr. Chatterjee'],
+    'General Medicine': ['Dr. Tiwari', 'Dr. Mishra', 'Dr. Saxena', 'Dr. Dubey'],
+    'Surgery': ['Dr. Yadav', 'Dr. Pandey', 'Dr. Tripathi', 'Dr. Jha'],
+    'Emergency': ['Dr. Basu', 'Dr. Sen', 'Dr. Ghosh', 'Dr. Roy'],
+    'ICU': ['Dr. Das', 'Dr. Banerjee', 'Dr. Mukherjee', 'Dr. Dutta']
+  };
+  
+  // Find matching specialty
+  let matchedSpecialty = 'General Medicine';
+  for (const [key, names] of Object.entries(doctorTemplates)) {
+    if (specialty.toLowerCase().includes(key.toLowerCase())) {
+      matchedSpecialty = key;
+      break;
     }
-    
-    // Get multi-specialists
-    const multiSpecialists = getMultiSpecialists(filteredClinics);
-    
-    res.json({
-      success: true,
-      type: 'multi',
-      count: multiSpecialists.length,
-      city: city || 'all',
-      specialists: multiSpecialists
+  }
+  
+  const doctorNames = doctorTemplates[matchedSpecialty] || doctorTemplates['General Medicine'];
+  
+  // Number of doctors based on clinic type
+  let doctorCount = 1;
+  if (clinicType === 'multi-specialty' || clinicName.toLowerCase().includes('hospital')) {
+    doctorCount = Math.floor(Math.random() * 3) + 2; // 2-4 doctors
+  }
+  
+  // Generate doctors
+  for (let i = 0; i < Math.min(doctorCount, doctorNames.length); i++) {
+    doctors.push({
+      id: `doc_${specialty.replace(/\s+/g, '_').toLowerCase()}_${i}`,
+      name: doctorNames[i],
+      specialty: matchedSpecialty,
+      experience: Math.floor(Math.random() * 20) + 5, // 5-25 years
+      consultationFee: calculateConsultationFee(matchedSpecialty, 4.0),
+      available: i % 3 !== 0 // Simulate availability
     });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// GET /api/clinics/specialists/by-specialization - Group by specialization
-router.get('/specialists/by-specialization', async (req, res) => {
-  try {
-    await connectDB();
-    
-    const { city } = req.query;
-    
-    const allClinics = await Clinic.find({}).lean();
-    
-    // Filter by city if provided
-    let filteredClinics = allClinics;
-    if (city) {
-      const cityLower = city.toLowerCase();
-      filteredClinics = allClinics.filter(clinic => {
-        const clinicCity = extractCityFromDocument(clinic).toLowerCase();
-        return clinicCity.includes(cityLower);
-      });
-    }
-    
-    // Group by specialization
-    const bySpecialization = groupBySpecialization(filteredClinics);
-    
-    res.json({
-      success: true,
-      totalClinics: filteredClinics.length,
-      city: city || 'all',
-      specializations: bySpecialization
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== HELPER FUNCTIONS ====================
-
-// Categorize specialists into individual and multi
-function categorizeSpecialists(clinics, specializationFilter, typeFilter) {
-  const individual = [];
-  const multi = [];
-  
-  clinics.forEach(clinic => {
-    const specialities = clinic.specialities || [];
-    const extractedCity = extractCityFromDocument(clinic);
-    
-    // Check if clinic matches specialization filter
-    let matchesSpecialization = true;
-    if (specializationFilter) {
-      const specLower = specializationFilter.toLowerCase();
-      matchesSpecialization = specialities.some(spec => 
-        spec.toLowerCase().includes(specLower)
-      );
-    }
-    
-    if (!matchesSpecialization) return;
-    
-    const specialistData = {
-      id: clinic._id,
-      name: clinic.name,
-      city: extractedCity,
-      address: clinic.address,
-      phone: clinic.phone,
-      specialities: specialities,
-      specializationCount: specialities.length,
-      rating: clinic.rating || 0,
-      isEmergency: clinic.isEmergency || false,
-      coordinates: clinic.location?.coordinates || null
-    };
-    
-    // Categorize based on number of specialities
-    if (specialities.length === 1) {
-      individual.push({
-        ...specialistData,
-        type: 'individual',
-        specialization: specialities[0]
-      });
-    } else if (specialities.length > 1) {
-      multi.push({
-        ...specialistData,
-        type: 'multi',
-        primarySpecialization: specialities[0],
-        otherSpecializations: specialities.slice(1)
-      });
-    }
-  });
-  
-  // Apply type filter if specified
-  let filteredIndividual = individual;
-  let filteredMulti = multi;
-  
-  if (typeFilter === 'individual') {
-    filteredMulti = [];
-  } else if (typeFilter === 'multi') {
-    filteredIndividual = [];
   }
   
-  return {
-    individualSpecialists: {
-      count: filteredIndividual.length,
-      specialists: filteredIndividual
+  return doctors;
+}
+
+// Helper function to generate detailed doctors
+function generateDetailedDoctors(specialty, clinicName, city) {
+  const doctors = [];
+  
+  // Specialties with their specific doctor names
+  const specialtyDetails = {
+    'Cardiology': {
+      names: ['Dr. Rajesh Sharma', 'Dr. Priya Verma', 'Dr. Amit Reddy', 'Dr. Neha Kapoor'],
+      qualifications: ['DM Cardiology', 'MD Medicine', 'FICC', 'DNB Cardiology'],
+      experiences: [15, 12, 18, 10]
     },
-    multiSpecialists: {
-      count: filteredMulti.length,
-      specialists: filteredMulti
+    'Neurology': {
+      names: ['Dr. Anil Patel', 'Dr. Sunita Kumar', 'Dr. Ravi Joshi', 'Dr. Meera Nair'],
+      qualifications: ['DM Neurology', 'MD Medicine', 'FNCSI', 'DNB Neurology'],
+      experiences: [14, 16, 12, 9]
     },
-    summary: {
-      total: filteredIndividual.length + filteredMulti.length,
-      individualPercentage: Math.round((filteredIndividual.length / clinics.length) * 100) || 0,
-      multiPercentage: Math.round((filteredMulti.length / clinics.length) * 100) || 0
+    'Orthopedics': {
+      names: ['Dr. Vikram Singh', 'Dr. Anjali Gupta', 'Dr. Sanjay Malhotra', 'Dr. Pooja Choudhary'],
+      qualifications: ['MS Orthopedics', 'MCh Ortho', 'DNB Ortho', 'FRCS'],
+      experiences: [20, 15, 18, 11]
+    },
+    'Pediatrics': {
+      names: ['Dr. Arvind Desai', 'Dr. Swati Iyer', 'Dr. Karan Mehta', 'Dr. Naina Rao'],
+      qualifications: ['MD Pediatrics', 'DNB Pediatrics', 'MRCPCH', 'FIAP'],
+      experiences: [13, 17, 10, 8]
+    },
+    'General Medicine': {
+      names: ['Dr. Ramesh Tiwari', 'Dr. Smita Mishra', 'Dr. Alok Saxena', 'Dr. Kavita Dubey'],
+      qualifications: ['MD Medicine', 'DNB Medicine', 'MRCP', 'FCPS'],
+      experiences: [25, 14, 19, 12]
+    },
+    'Surgery': {
+      names: ['Dr. Mahesh Yadav', 'Dr. Rekha Pandey', 'Dr. Nitin Tripathi', 'Dr. Sneha Jha'],
+      qualifications: ['MS Surgery', 'MCh', 'FRCS', 'DNB Surgery'],
+      experiences: [22, 16, 13, 9]
     }
   };
-}
-
-// Get only individual specialists
-function getIndividualSpecialists(clinics) {
-  return clinics
-    .filter(clinic => {
-      const specialities = clinic.specialities || [];
-      return specialities.length === 1;
-    })
-    .map(clinic => {
-      const specialities = clinic.specialities || [];
-      const extractedCity = extractCityFromDocument(clinic);
-      
-      return {
-        id: clinic._id,
-        name: clinic.name,
-        city: extractedCity,
-        address: clinic.address,
-        phone: clinic.phone,
-        specialization: specialities[0] || 'General',
-        type: 'individual',
-        rating: clinic.rating || 0,
-        isEmergency: clinic.isEmergency || false
-      };
-    });
-}
-
-// Get only multi-specialists
-function getMultiSpecialists(clinics) {
-  return clinics
-    .filter(clinic => {
-      const specialities = clinic.specialities || [];
-      return specialities.length > 1;
-    })
-    .map(clinic => {
-      const specialities = clinic.specialities || [];
-      const extractedCity = extractCityFromDocument(clinic);
-      
-      return {
-        id: clinic._id,
-        name: clinic.name,
-        city: extractedCity,
-        address: clinic.address,
-        phone: clinic.phone,
-        specialities: specialities,
-        specializationCount: specialities.length,
-        primarySpecialization: specialities[0] || 'General',
-        otherSpecializations: specialities.slice(1),
-        type: 'multi',
-        rating: clinic.rating || 0,
-        isEmergency: clinic.isEmergency || false
-      };
-    });
-}
-
-// Group clinics by specialization
-function groupBySpecialization(clinics) {
-  const specializationMap = {};
   
-  clinics.forEach(clinic => {
-    const specialities = clinic.specialities || [];
-    const extractedCity = extractCityFromDocument(clinic);
-    
-    specialities.forEach(specialization => {
-      if (!specializationMap[specialization]) {
-        specializationMap[specialization] = {
-          specialization: specialization,
-          count: 0,
-          clinics: [],
-          cities: new Set()
-        };
-      }
-      
-      specializationMap[specialization].count++;
-      specializationMap[specialization].cities.add(extractedCity);
-      
-      specializationMap[specialization].clinics.push({
-        id: clinic._id,
-        name: clinic.name,
-        city: extractedCity,
-        phone: clinic.phone,
-        allSpecialities: specialities,
-        isIndividual: specialities.length === 1,
-        isMulti: specialities.length > 1
-      });
-    });
-  });
-  
-  // Convert to array and sort by count
-  return Object.values(specializationMap)
-    .map(item => ({
-      ...item,
-      cities: Array.from(item.cities),
-      individualCount: item.clinics.filter(c => c.isIndividual).length,
-      multiCount: item.clinics.filter(c => c.isMulti).length
-    }))
-    .sort((a, b) => b.count - a.count);
-}
-
-// POST /api/clinics/add-specialist-type - Add specialist type field to clinics
-router.post('/add-specialist-type', async (req, res) => {
-  try {
-    await connectDB();
-    
-    const allClinics = await Clinic.find({}).lean();
-    let updatedCount = 0;
-    
-    for (const clinic of allClinics) {
-      const specialities = clinic.specialities || [];
-      const specialistType = specialities.length === 1 ? 'individual' : 
-                            specialities.length > 1 ? 'multi' : 'unknown';
-      
-      // Add specialistType field
-      await Clinic.updateOne(
-        { _id: clinic._id },
-        { 
-          $set: { 
-            specialistType: specialistType,
-            specializationCount: specialities.length
-          } 
-        }
-      );
-      updatedCount++;
+  // Find matching specialty
+  let matchedSpec = null;
+  for (const [key, details] of Object.entries(specialtyDetails)) {
+    if (specialty.toLowerCase().includes(key.toLowerCase())) {
+      matchedSpec = { ...details, specialty: key };
+      break;
     }
-    
-    // Get counts
-    const individualCount = await Clinic.countDocuments({ specialistType: 'individual' });
-    const multiCount = await Clinic.countDocuments({ specialistType: 'multi' });
-    
-    res.json({
-      success: true,
-      updated: updatedCount,
-      summary: {
-        individual: individualCount,
-        multi: multiCount,
-        unknown: updatedCount - individualCount - multiCount
-      },
-      message: `Added specialist type to ${updatedCount} clinics`
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
   }
-});
+  
+  // Default to General Medicine if no match
+  if (!matchedSpec) {
+    matchedSpec = {
+      ...specialtyDetails['General Medicine'],
+      specialty: 'General Medicine'
+    };
+  }
+  
+  // Determine number of doctors based on clinic
+  let doctorCount = 1;
+  if (clinicName.toLowerCase().includes('hospital') || clinicName.toLowerCase().includes('multispecialty')) {
+    doctorCount = Math.min(3, matchedSpec.names.length);
+  }
+  
+  // Generate doctors
+  for (let i = 0; i < doctorCount; i++) {
+    const isIndividual = doctorCount === 1;
+    
+    doctors.push({
+      id: `dr_${city.toLowerCase()}_${matchedSpec.specialty.toLowerCase()}_${i}`,
+      name: matchedSpec.names[i],
+      specialty: matchedSpec.specialty,
+      subSpecialty: getSubSpecialty(matchedSpec.specialty),
+      qualification: matchedSpec.qualifications[i],
+      experience: matchedSpec.experiences[i],
+      consultationFee: calculateConsultationFee(matchedSpec.specialty, matchedSpec.experiences[i]),
+      availableDays: getAvailableDays(i),
+      timings: getConsultationTimings(i),
+      clinicType: isIndividual ? 'individual' : 'multi-specialty',
+      rating: (Math.random() * 1.5 + 3.5).toFixed(1), // 3.5-5.0
+      languages: ['Hindi', 'English', getRegionalLanguage(city)],
+      isAcceptingNewPatients: Math.random() > 0.3
+    });
+  }
+  
+  return doctors;
+}
+
+// Helper functions
+function getSubSpecialty(specialty) {
+  const subSpecialties = {
+    'Cardiology': ['Interventional', 'Non-Invasive', 'Pediatric Cardiology'],
+    'Neurology': ['Stroke', 'Epilepsy', 'Movement Disorders'],
+    'Orthopedics': ['Joint Replacement', 'Spine', 'Sports Medicine'],
+    'Pediatrics': ['Neonatology', 'Pediatric Cardiology', 'Pediatric Neurology']
+  };
+  return subSpecialties[specialty] ? subSpecialties[specialty][Math.floor(Math.random() * subSpecialties[specialty].length)] : null;
+}
+
+function getAvailableDays(doctorIndex) {
+  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const start = doctorIndex % days.length;
+  return days.slice(start, start + 4);
+}
+
+function getConsultationTimings(doctorIndex) {
+  const shifts = [
+    '10:00 AM - 2:00 PM',
+    '2:00 PM - 6:00 PM', 
+    '9:00 AM - 1:00 PM',
+    '4:00 PM - 8:00 PM'
+  ];
+  return shifts[doctorIndex % shifts.length];
+}
+
+function getRegionalLanguage(city) {
+  const cityLanguages = {
+    'delhi': 'Punjabi',
+    'mumbai': 'Marathi',
+    'chennai': 'Tamil',
+    'bangalore': 'Kannada',
+    'kolkata': 'Bengali',
+    'hyderabad': 'Telugu',
+    'pune': 'Marathi',
+    'jaipur': 'Rajasthani',
+    'gurugram': 'Haryanvi',
+    'nagpur': 'Marathi'
+  };
+  return cityLanguages[city.toLowerCase()] || 'Local Language';
+}
+
+function calculateConsultationFee(specialty, experience) {
+  const baseFees = {
+    'Cardiology': 1500,
+    'Neurology': 1400,
+    'Orthopedics': 1200,
+    'Pediatrics': 800,
+    'General Medicine': 700,
+    'Surgery': 1600
+  };
+  
+  const baseFee = baseFees[specialty] || 1000;
+  const experienceMultiplier = 1 + (experience / 100);
+  
+  return Math.round(baseFee * experienceMultiplier);
+}
